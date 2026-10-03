@@ -11,9 +11,10 @@ from memory_store import (
     compose_profile_answer,
     estimate_tokens,
     extract_profile_updates,
+    DEFAULT_CONFIDENCE_THRESHOLD,
     is_recall_request,
 )
-from model_provider import build_chat_model
+from model_provider import build_chat_model, message_text, turn_usage
 
 ADVANCED_SYSTEM_PROMPT = (
     "Bạn là trợ lý tiếng Việt có bộ nhớ dài hạn trong file User.md.\n"
@@ -38,9 +39,18 @@ class AdvancedAgent:
     3. compact memory         -> older messages folded into a bounded summary
     """
 
-    def __init__(self, config: LabConfig | None = None, force_offline: bool = False) -> None:
+    def __init__(
+        self,
+        config: LabConfig | None = None,
+        force_offline: bool = False,
+        min_confidence: float = DEFAULT_CONFIDENCE_THRESHOLD,
+        use_negation: bool = True,
+    ) -> None:
         self.config = config or load_config()
         self.force_offline = force_offline
+        # Extraction guardrails; the defaults are the real system, other values exist for ablation.
+        self.min_confidence = min_confidence
+        self.use_negation = use_negation
         self.profile_store = UserProfileStore(self.config.state_dir / "profiles")
         self.compact_memory = CompactMemoryManager(
             threshold_tokens=self.config.compact_threshold_tokens,
@@ -52,11 +62,15 @@ class AdvancedAgent:
         # Live mode: the tools and dynamic prompt read the user of the turn being processed.
         self.active_context: AgentContext | None = None
         self.langchain_agent = None
-        if not force_offline and self.config.model.is_live_ready():
-            try:
-                self.langchain_agent = self._maybe_build_langchain_agent()
-            except Exception:
-                self.langchain_agent = None
+        self.live_error: str | None = None
+        if not force_offline:
+            if not self.config.model.is_live_ready():
+                self.live_error = f"provider '{self.config.model.provider}' is missing its API key / base URL"
+            else:
+                try:
+                    self.langchain_agent = self._maybe_build_langchain_agent()
+                except Exception as exc:  # fall back to offline, but remember why
+                    self.live_error = f"{type(exc).__name__}: {exc}"
 
     def reply(self, user_id: str, thread_id: str, message: str) -> dict[str, Any]:
         if self.langchain_agent is not None:
@@ -76,7 +90,7 @@ class AdvancedAgent:
         return self.compact_memory.compaction_count(thread_id)
 
     def _persist_profile_updates(self, user_id: str, message: str) -> dict[str, str]:
-        updates = extract_profile_updates(message)
+        updates = extract_profile_updates(message, self.min_confidence, self.use_negation)
         for key, value in updates.items():
             self.profile_store.upsert_fact(user_id, key, value)
         return updates
@@ -137,11 +151,10 @@ class AdvancedAgent:
             {"messages": [{"role": "user", "content": message}]},
             config={"configurable": {"thread_id": thread_id}},
         )
-        last = result["messages"][-1]
-        response = last.content if isinstance(last.content, str) else str(last.content)
-        usage = getattr(last, "usage_metadata", None) or {}
-        prompt_tokens = usage.get("input_tokens") or self._estimate_prompt_context_tokens(user_id, thread_id)
-        output_tokens = usage.get("output_tokens") or estimate_tokens(response)
+        response = message_text(result["messages"][-1])
+        input_tokens, output_tokens = turn_usage(result["messages"])
+        prompt_tokens = input_tokens or self._estimate_prompt_context_tokens(user_id, thread_id)
+        output_tokens = output_tokens or estimate_tokens(response)
 
         self.compact_memory.append(thread_id, "assistant", response)
         self.thread_prompt_tokens[thread_id] = self.prompt_token_usage(thread_id) + prompt_tokens

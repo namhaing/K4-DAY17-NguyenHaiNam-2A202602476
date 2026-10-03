@@ -55,11 +55,18 @@ Lệnh: `python src/benchmark.py` (offline, `compact_threshold_tokens=800`, `com
 | Baseline | 2502 | 21563 | 0.000 | 0.000 |   0 | 0 |
 | Advanced | 2649 |  9980 | 1.000 | 1.000 | 259 | 6 |
 
+**Guardrail Benchmark (bonus)** – `data/guardrail_cases.json` (3 hội thoại, 19 lượt, 4 câu hỏi recall). Đây là bộ dữ liệu do mình tự viết. Mỗi hội thoại nhắm vào một bẫy: câu phỏng đoán hoặc câu điều kiện về nơi ở, phủ định không được nhắc lại ở cuối, và correction giá trị yêu thích. Mỗi câu hỏi có thêm trường `expected_not_contains` liệt kê các fact cũ/sai.
+
+| Agent    | Agent tokens only | Prompt tokens processed | Cross-session recall | Response quality | Memory growth (bytes) | Compactions |
+|----------|------:|------:|------:|------:|----:|---:|
+| Baseline | 349 | 1168 | 0.000 | 0.000 |   0 | 0 |
+| Advanced | 421 | 2081 | 1.000 | 1.000 | 180 | 0 |
+
 Cách đo:
 - **Agent tokens only**: tổng token của message người dùng và câu trả lời trong các thread hội thoại (ước lượng ~4 ký tự/token).
 - **Prompt tokens processed**: tổng ngữ cảnh đưa vào ở từng lượt. Baseline tính toàn bộ lịch sử thread; Advanced tính `User.md` + summary + message gần nhất.
-- **Cross-session recall**: câu hỏi recall được hỏi ở **thread mới**. Điểm: 1 nếu đủ mọi chuỗi `expected_contains`, 0.5 nếu đủ một phần, 0 nếu không có.
-- **Response quality** (heuristic, thang 0–1): `coverage × (0.7 + 0.15·ngắn gọn + 0.15·có bullet)`; điểm coverage bị chia đôi nếu câu trả lời thừa nhận "chưa có thông tin".
+- **Cross-session recall**: câu hỏi recall được hỏi ở **thread mới**. Điểm: 1 nếu đủ mọi chuỗi `expected_contains`, 0.5 nếu đủ một phần, 0 nếu không có. Câu trả lời vẫn nêu một fact trong `expected_not_contains` bị **0 điểm**, vì giữ song song fact cũ và fact mới là sai.
+- **Response quality**: ở chế độ offline dùng heuristic thang 0–1, `coverage × (0.7 + 0.15·ngắn gọn + 0.15·có bullet)`; coverage bị chia đôi nếu câu trả lời thừa nhận "chưa có thông tin" và chia đôi thêm lần nữa nếu có fact cũ. Ở chế độ `--live` dùng **LLM-as-judge** (`judge_model` trong config) chấm 0–10: 6 điểm cho fact đúng, 2 điểm cho việc không có fact cũ, 2 điểm cho sự ngắn gọn. Nếu judge lỗi thì quay về heuristic và in số lần phải quay về.
 - Token ở thread recall không được cộng vào hai cột token. Quy tắc này áp dụng giống nhau cho cả hai agent.
 
 ## 3. Phân tích
@@ -85,7 +92,7 @@ Câu hỏi recall được hỏi ở thread mới. Baseline có thread trống n
 - Advanced giữ ngữ cảnh mỗi lượt quanh một mức trần (≈ `User.md` + summary ≤ 8 dòng + 4 message) → chi phí tăng **gần tuyến tính**.
 - `Agent tokens only` **không giảm** (2 649 so với 2 502), vì compact không thay đổi lượng văn bản người dùng gửi và agent sinh ra. Nó chỉ cắt phần ngữ cảnh cũ bị kéo theo. Vì vậy compact tối ưu chủ yếu ở `Prompt tokens processed`.
 
-Ablation trên bộ Stress (các cấu hình khác giữ nguyên):
+Ablation trên bộ Stress (các cấu hình khác giữ nguyên; chạy lại bằng `python src/ablation.py`):
 
 | Cấu hình Advanced | Prompt tokens | Compactions | Recall |
 |---|---:|---:|---:|
@@ -112,19 +119,31 @@ Nhận xét:
 
 ## 4. Bonus
 
+Ablation guardrail của Advanced (`python src/ablation.py`). "Answers with stale fact" là số câu trả lời recall vẫn nêu fact trong `expected_not_contains` (chỉ bộ Guardrail có trường này):
+
+| Advanced variant | Recall – Standard | Recall – Stress | Recall – Guardrail | Answers with stale fact |
+|---|---:|---:|---:|---:|
+| **full system** | **1.000** | **1.000** | **1.000** | **0** |
+| không có confidence threshold | 1.000 | 1.000 | 0.750 | 1 |
+| không xử lý phủ định | 0.929 | 1.000 | 0.750 | 1 |
+| tắt cả hai | 0.929 | 1.000 | 0.500 | 2 |
+
+Hai guardrail **bổ trợ nhau**: mỗi cái chặn một loại lỗi khác nhau, tắt cái nào cũng mất một câu, tắt cả hai thì recall Guardrail giảm một nửa. Bộ Stress luôn đạt 1.0 vì dữ liệu có câu nhắc lại fact đúng ở cuối, và chính điều đó là lý do mình phải tự viết bộ Guardrail để lộ ra lỗi.
+
 ### 4.1 Conflict handling: correction ghi đè, không giữ song song fact cũ
 - **Vấn đề:** người dùng đính chính (Đà Nẵng → Huế, backend → MLOps); nếu append tự do, `User.md` sẽ giữ cả hai giá trị và agent có thể trả lời bằng fact cũ.
 - **Giải pháp:**
   1. `upsert_fact` ghi đè theo key, nên mỗi field chỉ có đúng một dòng.
   2. Trong extractor, xét **phủ định theo từng mệnh đề**: câu được tách theo `, ; :` / "chứ" / "nhưng"; một thực thể bị huỷ nếu phần đứng trước nó trong cùng mệnh đề chứa "không còn", "lúc đầu", "trước đó", "ví dụ cũ", "đùa", "hay là"…, hoặc ngay sau nó là "chỉ là".
   3. Thực thể chỉ được nhận khi có **trigger khẳng định** ("đang ở", "làm việc ở", "chuyển sang", "nghề"…).
-- **Hiệu quả (ablation):** tắt xử lý phủ định thì recall Standard giảm **1.000 → 0.929**. Câu "mình làm MLOps engineer **chứ không còn là backend engineer**" (conv-09) khiến nghề bị ghi ngược thành backend engineer, nên conv-09 và conv-10 trả lời sai. Bộ Stress không đổi, vì dữ liệu có câu khẳng định lại ở cuối; nghĩa là bộ dữ liệu này chưa đủ để lộ lỗi đó. Test: `test_correction_overwrites_stale_fact`, `test_noise_does_not_override_profile`.
+  4. Giá trị yêu thích dừng ở từ đối lập: "đồ uống yêu thích là matcha latte **chứ không phải** trà đào" → `matcha latte`.
+- **Hiệu quả (ablation):** tắt xử lý phủ định thì recall Standard giảm **1.000 → 0.929**. Câu "mình làm MLOps engineer **chứ không còn là backend engineer**" (conv-09) khiến nghề bị ghi ngược thành backend engineer, nên conv-09 và conv-10 trả lời sai. Trên bộ Guardrail, recall giảm **1.000 → 0.750**: câu "**Lúc trước** mình làm data engineer" ghi đè `ML engineer`. Test: `test_correction_overwrites_stale_fact`, `test_noise_does_not_override_profile`, `test_correction_value_stops_at_contrast_word`, `test_guardrails_are_needed_on_guardrail_dataset`.
 - **Rủi ro:** fact mới luôn thắng, nên một câu khẳng định sai (hoặc câu đùa không có từ "đùa") sẽ ghi đè fact đúng. Hệ thống không lưu lịch sử nên không rollback được.
 
 ### 4.2 Confidence threshold
 - **Vấn đề:** không phải câu nào khớp pattern cũng là fact: có câu hỏi, câu điều kiện, câu phỏng đoán.
 - **Giải pháp:** `extract_profile_facts()` trả về `ProfileFact(key, value, confidence, evidence)`. Điểm gốc theo độ chắc của pattern ("tên là", "món ăn yêu thích là": 0.95; dựa trên trigger: 0.85; "uống …": 0.75). Câu có hedge ("có lẽ", "hình như", "giả sử", "đùa") bị trừ 0.4, câu điều kiện "nếu" bị trừ 0.3 (riêng style trả lời được miễn, vì chỉ dẫn thường có dạng "nếu bạn giải thích thì…"). Chỉ fact có `confidence ≥ 0.6` mới được ghi. Câu hỏi bị loại từ đầu.
-- **Hiệu quả:** trên bộ dữ liệu hiện tại, đặt ngưỡng 0 vẫn cho kết quả giống hệt (recall 1.0, cùng số bytes), tức là **chưa thấy lợi ích đo được** trên benchmark này. Lợi ích được kiểm chứng bằng test với câu phỏng đoán "Có lẽ mình sẽ chuyển ra Hà Nội" (`test_confidence_threshold_skips_hedged_facts`).
+- **Hiệu quả:** trên bộ Standard và Stress, bỏ ngưỡng không làm đổi kết quả, vì hai bộ này không có câu phỏng đoán hay câu điều kiện về fact. Trên bộ Guardrail, bỏ ngưỡng làm recall giảm **1.000 → 0.750**: câu "Có lẽ tháng sau mình sẽ chuyển ra Hà Nội" (0.45) và "Nếu công ty mở chi nhánh thì mình sẽ chuyển về Đà Nẵng" (0.55) ghi đè nơi ở Huế, và agent trả lời "Đà Nẵng". Test: `test_confidence_threshold_skips_hedged_facts`, `test_guardrails_are_needed_on_guardrail_dataset`.
 - **Rủi ro:** có false negative thật. Câu "mình đang ở Huế để dùng ví dụ địa phương **nếu** cần" (conv-08) bị loại (0.55) chỉ vì chữ "nếu" nằm ở mệnh đề phụ. Ở đây không gây hại vì Huế đã được ghi từ trước, nhưng cho thấy ngưỡng quá chặt sẽ làm mất correction thật.
 
 ### 4.3 Entity extraction có cấu trúc
@@ -133,8 +152,9 @@ Nhận xét:
 
 ## 5. Hạn chế và hướng mở rộng
 - Chế độ offline dùng regex và whitelist, chỉ đủ cho bộ dữ liệu này. Ở production nên dùng LLM extraction với output có cấu trúc, rồi vẫn giữ lớp confidence/negation làm guardrail.
-- `Response quality` hiện là heuristic. `judge_model` đã có trong config để thay bằng LLM-as-judge ở chế độ `--live`.
-- Chế độ live đã được kiểm tra ở mức dựng được agent graph, nhưng chưa chạy với API key thật nên chưa có số liệu live.
+- `Response quality` offline là heuristic. LLM-as-judge chỉ chạy ở `--live`, nên giữa hai chế độ cột này không so sánh trực tiếp được.
+- Chế độ live: nếu yêu cầu `--live` mà agent không khởi tạo được (thiếu key, lỗi SDK…), benchmark dừng và in lý do, chứ không lặng lẽ chạy offline. Token lấy từ `usage_metadata` của **mọi** lần gọi model trong một lượt (gồm cả tool call). Còn hai giới hạn: lượt gọi model của `SummarizationMiddleware` không được tính vào token, và cột `Compactions` ở chế độ live đếm theo `CompactMemoryManager` chạy song song (cùng ngưỡng), chứ không phải số lần middleware thật sự tóm tắt.
+- Bộ Guardrail còn nhỏ (4 câu hỏi), nên dùng để chứng minh cơ chế hoạt động, chưa đủ để ước lượng tỉ lệ lỗi.
 - Memory decay (giảm ưu tiên fact lâu không nhắc lại) chưa làm. Đây là bước tiếp theo để chặn các field danh sách phình to.
 
 ## 6. Cách chạy
@@ -146,6 +166,7 @@ pip install -r requirements.txt
 
 python src/benchmark.py            # offline, deterministic
 python src/benchmark.py --verbose  # in cả câu hỏi và câu trả lời recall
-python src/benchmark.py --live     # dùng provider trong .env (xem .env.example)
-pytest src/test_agents.py -v       # 12 test
+python src/benchmark.py --live     # dùng provider trong .env (xem .env.example) + LLM judge
+python src/ablation.py             # tái tạo các bảng ablation ở mục 3.3 và 4
+pytest src/test_agents.py -v       # 17 test
 ```

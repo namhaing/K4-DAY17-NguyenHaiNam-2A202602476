@@ -150,7 +150,7 @@ _CLAUSE_SPLIT = re.compile(r"[,;:]|\s(?:chứ|nhưng)\s")
 _QUESTION_MARKERS = ("là gì", "con gì", "nhớ lại xem", "hỏi lại", "hỏi tiếp", "sẽ hỏi")
 # Negation / staleness markers that cancel an entity mentioned after them in the same clause.
 _NEGATION_MARKERS = (
-    "không còn", "không phải", "đừng", "lúc đầu", "trước đó", "trước đây",
+    "không còn", "không phải", "đừng", "lúc đầu", "lúc trước", "trước đó", "trước đây",
     "ví dụ cũ", "đùa", "nghề cũ", "hay là",
 )
 # Hedges lower confidence; conditionals lower it a bit less.
@@ -177,11 +177,13 @@ _ROLE_TRIGGER = re.compile(r"(?:làm|là|sang|nghề)\s+$", re.IGNORECASE)
 _CANONICAL_ROLES = {"mlops engineer": "MLOps engineer", "ml engineer": "ML engineer", "ai engineer": "AI engineer"}
 
 _NAME_PATTERN = re.compile(r"\btên (?:mình |tôi |em )?là ([^\W\d_]\w*(?:\s+[^\W\d_]\w*)*)", re.IGNORECASE)
+# A favourite value stops at punctuation or at a contrast word ("X chứ không phải Y").
+_VALUE = r"([^,.;!?]+?)(?=\s+(?:chứ|nhưng|và)\b|[,.;!?]|$)"
 _DRINK_PATTERNS = (
-    (re.compile(r"đồ uống yêu thích(?: của mình)? là ([^,.;!?]+)", re.IGNORECASE), 0.95),
+    (re.compile(rf"đồ uống yêu thích(?: của mình)?(?: bây giờ| hiện tại)? là {_VALUE}", re.IGNORECASE), 0.95),
     (re.compile(r"\buống ((?:cà phê|trà|nước)[\w ]*?)(?= như| nhưng| mỗi|[,.;!?]|$)", re.IGNORECASE), 0.75),
 )
-_FOOD_PATTERN = re.compile(r"món ăn yêu thích(?: của mình)? là ([^,.;!?]+)", re.IGNORECASE)
+_FOOD_PATTERN = re.compile(rf"món ăn yêu thích(?: của mình)?(?: bây giờ| hiện tại)? là {_VALUE}", re.IGNORECASE)
 _PET_PATTERN = re.compile(
     r"\bnuôi (?:một |1 )?(?:bé |con |chú |em )?([^\W\d_]+)(?: tên ([^\W\d_]+))?", re.IGNORECASE
 )
@@ -227,14 +229,16 @@ def _confidence(base: float, sentence: str, conditional_penalty: float = 0.3) ->
     return round(max(score, 0.0), 2)
 
 
-def _affirmed_entities(sentence: str, pattern: re.Pattern, trigger: re.Pattern) -> list[str]:
+def _affirmed_entities(
+    sentence: str, pattern: re.Pattern, trigger: re.Pattern, use_negation: bool = True
+) -> list[str]:
     """Entities introduced by an affirmative trigger and not negated earlier in their clause."""
 
     found: list[str] = []
     for clause in _CLAUSE_SPLIT.split(sentence):
         for match in pattern.finditer(clause):
             prefix, suffix = clause[: match.start()], clause[match.end():]
-            if trigger.search(prefix) and not _is_negated(prefix, suffix):
+            if trigger.search(prefix) and not (use_negation and _is_negated(prefix, suffix)):
                 found.append(match.group(0))
     return found
 
@@ -272,8 +276,11 @@ def _extract_interests(sentence: str) -> str | None:
     return ", ".join(found) or None
 
 
-def extract_profile_facts(message: str) -> list[ProfileFact]:
-    """Return every candidate fact in `message` together with a confidence score."""
+def extract_profile_facts(message: str, use_negation: bool = True) -> list[ProfileFact]:
+    """Return every candidate fact in `message` together with a confidence score.
+
+    `use_negation=False` disables clause-level negation handling (ablation only).
+    """
 
     facts: list[ProfileFact] = []
     for sentence in split_sentences(message):
@@ -287,10 +294,10 @@ def extract_profile_facts(message: str) -> list[ProfileFact]:
 
         add("name", _extract_name(sentence), 0.95)
 
-        for location in _affirmed_entities(sentence, _LOCATION_PATTERN, _LOCATION_TRIGGER):
+        for location in _affirmed_entities(sentence, _LOCATION_PATTERN, _LOCATION_TRIGGER, use_negation):
             add("location", location, 0.85)
 
-        for role in _affirmed_entities(sentence, _ROLE_PATTERN, _ROLE_TRIGGER):
+        for role in _affirmed_entities(sentence, _ROLE_PATTERN, _ROLE_TRIGGER, use_negation):
             add("profession", _CANONICAL_ROLES.get(role.lower(), role.lower()), 0.85)
 
         for pattern, base in _DRINK_PATTERNS:
@@ -314,14 +321,16 @@ def extract_profile_facts(message: str) -> list[ProfileFact]:
     return facts
 
 
-def extract_profile_updates(message: str, min_confidence: float = DEFAULT_CONFIDENCE_THRESHOLD) -> dict[str, str]:
+def extract_profile_updates(
+    message: str, min_confidence: float = DEFAULT_CONFIDENCE_THRESHOLD, use_negation: bool = True
+) -> dict[str, str]:
     """Convert raw user text into stable profile facts that pass the confidence threshold.
 
     Within one message the latest single-valued fact wins; list-like fields are merged.
     """
 
     updates: dict[str, str] = {}
-    for fact in extract_profile_facts(message):
+    for fact in extract_profile_facts(message, use_negation):
         if fact.confidence < min_confidence:
             continue
         if fact.key in MERGE_FIELDS and fact.key in updates:

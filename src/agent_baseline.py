@@ -5,7 +5,7 @@ from typing import Any
 
 from config import LabConfig, load_config
 from memory_store import compose_profile_answer, estimate_tokens, extract_profile_updates, is_recall_request
-from model_provider import build_chat_model
+from model_provider import build_chat_model, message_text, turn_usage
 
 BASELINE_SYSTEM_PROMPT = (
     "Bạn là trợ lý tiếng Việt. Bạn chỉ nhớ nội dung trong cuộc hội thoại hiện tại. "
@@ -34,11 +34,15 @@ class BaselineAgent:
         self.sessions: dict[str, SessionState] = {}
 
         self.langchain_agent = None
-        if not force_offline and self.config.model.is_live_ready():
-            try:
-                self.langchain_agent = self._maybe_build_langchain_agent()
-            except Exception:
-                self.langchain_agent = None
+        self.live_error: str | None = None
+        if not force_offline:
+            if not self.config.model.is_live_ready():
+                self.live_error = f"provider '{self.config.model.provider}' is missing its API key / base URL"
+            else:
+                try:
+                    self.langchain_agent = self._maybe_build_langchain_agent()
+                except Exception as exc:  # fall back to offline, but remember why
+                    self.live_error = f"{type(exc).__name__}: {exc}"
 
     def reply(self, user_id: str, thread_id: str, message: str) -> dict[str, Any]:
         if self.langchain_agent is not None:
@@ -101,11 +105,10 @@ class BaselineAgent:
             {"messages": [{"role": "user", "content": message}]},
             config={"configurable": {"thread_id": thread_id}},
         )
-        last = result["messages"][-1]
-        response = last.content if isinstance(last.content, str) else str(last.content)
-        usage = getattr(last, "usage_metadata", None) or {}
-        prompt_tokens = usage.get("input_tokens") or sum(estimate_tokens(m["content"]) for m in session.messages)
-        output_tokens = usage.get("output_tokens") or estimate_tokens(response)
+        response = message_text(result["messages"][-1])
+        input_tokens, output_tokens = turn_usage(result["messages"])
+        prompt_tokens = input_tokens or sum(estimate_tokens(m["content"]) for m in session.messages)
+        output_tokens = output_tokens or estimate_tokens(response)
 
         session.messages.append({"role": "assistant", "content": response})
         session.prompt_tokens_processed += prompt_tokens

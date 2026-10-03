@@ -1,0 +1,65 @@
+[
+  {
+    "id": "guard-01-hedge",
+    "user_id": "minhanh_guard",
+    "turns": [
+      "Chào bạn, mình tên là Minh Anh.",
+      "Mình đang ở Huế và làm data engineer cho một công ty logistics.",
+      "Món ăn yêu thích của mình là bún bò.",
+      "Có lẽ tháng sau mình sẽ chuyển ra Hà Nội, nhưng chưa chắc lắm.",
+      "Nếu công ty mở chi nhánh mới thì mình sẽ chuyển về Đà Nẵng.",
+      "Hôm nay mình chỉ ngồi viết pipeline ETL thôi.",
+      "Bạn trả lời ngắn gọn giúp mình nhé, mình đang khá bận."
+    ],
+    "recall_questions": [
+      {
+        "question": "Hiện tại mình đang ở đâu?",
+        "expected_contains": ["Huế"],
+        "expected_not_contains": ["Hà Nội", "Đà Nẵng"]
+      }
+    ]
+  },
+  {
+    "id": "guard-02-negation",
+    "user_id": "minhanh_guard",
+    "turns": [
+      "Hôm nay mình có tin mới về công việc.",
+      "Mình làm ML engineer chứ không còn là data engineer nữa.",
+      "Team mới làm nhiều về mô hình gợi ý cho khách hàng.",
+      "Hay là mình chuyển sang product manager luôn cho nhàn, đùa thôi.",
+      "Lúc trước mình làm data engineer ở Huế, giờ thì khác rồi.",
+      "Tối nay mình sẽ đọc thêm về feature store."
+    ],
+    "recall_questions": [
+      {
+        "question": "Bây giờ mình làm nghề gì?",
+        "expected_contains": ["ML engineer"],
+        "expected_not_contains": ["data engineer", "product manager"]
+      }
+    ]
+  },
+  {
+    "id": "guard-03-correction",
+    "user_id": "minhanh_guard",
+    "turns": [
+      "Đồ uống yêu thích là trà đào.",
+      "Bạn có nhớ đồ uống yêu thích của mình là gì không?",
+      "À đính chính: đồ uống yêu thích của mình là matcha latte chứ không phải trà đào.",
+      "Tuần sau mình bay ra Đà Nẵng dự hội thảo hai ngày.",
+      "Mình vẫn ở Huế nhé, chỉ đi công tác thôi.",
+      "Cuối tuần mình hay chạy bộ quanh hồ Tịnh Tâm."
+    ],
+    "recall_questions": [
+      {
+        "question": "Đồ uống yêu thích hiện tại của mình là gì?",
+        "expected_contains": ["matcha latte"],
+        "expected_not_contains": ["trà đào"]
+      },
+      {
+        "question": "Tên mình là gì và mình đang ở đâu?",
+        "expected_contains": ["Minh Anh", "Huế"],
+        "expected_not_contains": ["Đà Nẵng", "Hà Nội"]
+      }
+    ]
+  }
+]

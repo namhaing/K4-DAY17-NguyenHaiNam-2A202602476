@@ -6,9 +6,10 @@ from pathlib import Path
 
 from agent_advanced import AdvancedAgent
 from agent_baseline import BaselineAgent
-from benchmark import heuristic_quality, recall_points
+from benchmark import heuristic_quality, load_conversations, recall_points, run_agent_benchmark
 from config import load_config
 from memory_store import CompactMemoryManager, UserProfileStore, extract_profile_facts, extract_profile_updates
+from model_provider import message_text, turn_usage
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -179,3 +180,51 @@ def test_recall_and_quality_scoring() -> None:
     assert recall_points("Mình chưa có thông tin.", expected) == 0.0
     assert heuristic_quality("- Tên: DũngCT\n- Nơi ở: Huế", expected) > heuristic_quality("DũngCT", expected)
     assert heuristic_quality("Mình chưa có thông tin.", expected) == 0.0
+
+
+def test_correction_value_stops_at_contrast_word() -> None:
+    updates = extract_profile_updates("À đính chính: đồ uống yêu thích của mình là matcha latte chứ không phải trà đào.")
+    assert updates["favorite_drink"] == "matcha latte"
+
+
+def test_guardrails_are_needed_on_guardrail_dataset(tmp_path: Path) -> None:
+    conversations = load_conversations(REPO_ROOT / "data" / "guardrail_cases.json")
+
+    def recall(**kwargs) -> float:
+        # Each variant gets its own state dir so User.md files never leak between runs.
+        config = replace(make_config(tmp_path / ("_".join(kwargs) or "full")), compact_threshold_tokens=800)
+        agent = AdvancedAgent(config, force_offline=True, **kwargs)
+        return run_agent_benchmark("Advanced", agent, conversations, config).recall_score
+
+    assert recall() == 1.0
+    assert recall(min_confidence=0.0) < 1.0
+    assert recall(use_negation=False) < 1.0
+
+
+def test_stale_fact_in_answer_scores_zero_recall() -> None:
+    assert recall_points("- Nơi ở hiện tại: Huế", ["Huế"], ["Đà Nẵng"]) == 1.0
+    assert recall_points("- Nơi ở: Huế (trước đây Đà Nẵng)", ["Huế"], ["Đà Nẵng"]) == 0.0
+
+
+def test_live_mode_reports_why_it_is_unavailable(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    config = replace(config, model=replace(config.model, provider="openai", api_key=None))
+    for agent in (BaselineAgent(config), AdvancedAgent(config)):
+        assert agent.langchain_agent is None
+        assert "API key" in agent.live_error
+
+
+def test_turn_usage_sums_every_model_call_in_the_turn() -> None:
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    usage = lambda i, o: {"input_tokens": i, "output_tokens": o, "total_tokens": i + o}  # noqa: E731
+    messages = [
+        HumanMessage("lượt cũ"),
+        AIMessage("cũ", usage_metadata=usage(999, 999)),
+        HumanMessage("lượt mới"),
+        AIMessage("", usage_metadata=usage(100, 10)),
+        ToolMessage("updated", tool_call_id="1"),
+        AIMessage([{"type": "text", "text": "Xong"}], usage_metadata=usage(130, 5)),
+    ]
+    assert turn_usage(messages) == (230, 15)
+    assert message_text(messages[-1]) == "Xong"

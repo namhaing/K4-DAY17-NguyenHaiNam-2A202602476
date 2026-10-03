@@ -53,6 +53,35 @@ def normalize_provider(value: str) -> str:
     return provider
 
 
+def message_text(message) -> str:
+    """Plain text of a chat message whose content may be a string or a list of content blocks."""
+
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    parts = [block.get("text", "") if isinstance(block, dict) else str(block) for block in content]
+    return "".join(parts)
+
+
+def turn_usage(messages: list) -> tuple[int, int]:
+    """Sum (input_tokens, output_tokens) of every model call made after the last user message.
+
+    One agent turn can call the model several times (tool call -> tool result -> answer),
+    so reading only the final message would under-count prompt tokens.
+    """
+
+    start = 0
+    for index, message in enumerate(messages):
+        if getattr(message, "type", None) == "human":
+            start = index + 1
+    input_tokens = output_tokens = 0
+    for message in messages[start:]:
+        usage = getattr(message, "usage_metadata", None) or {}
+        input_tokens += usage.get("input_tokens", 0)
+        output_tokens += usage.get("output_tokens", 0)
+    return input_tokens, output_tokens
+
+
 def build_chat_model(config: ProviderConfig):
     """Instantiate the real chat model for the selected provider.
 

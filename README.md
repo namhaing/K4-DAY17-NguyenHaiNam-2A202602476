@@ -1,5 +1,31 @@
 # Phase 2, Track 3, Day 17: Memory Systems for AI Agent
 
+## Bài làm – Nguyễn Hải Nam (2A202602476)
+
+- **Báo cáo phân tích:** [REPORT.md](REPORT.md): kiến trúc, kết quả benchmark, trade-off, ablation, bonus, rủi ro
+- **Code:** toàn bộ `src/` đã được hoàn thiện (offline deterministic + live LangChain cho 6 provider)
+- **Dữ liệu thêm:** `data/guardrail_cases.json` là bộ bẫy tự viết (phỏng đoán, phủ định, correction) để đo hiệu quả bonus
+
+Kết quả chính (offline, `python src/benchmark.py`):
+
+| Bộ dữ liệu | Recall Baseline → Advanced | Prompt tokens Baseline → Advanced | Compactions (Advanced) |
+|---|---|---|---|
+| Standard (10 phiên ngắn) | 0.000 → **1.000** | 10 843 → 19 312 (**+78%**, chi phí của `User.md`) | 0 |
+| Long-Context Stress (16 lượt dài) | 0.000 → **1.000** | 21 563 → 9 980 (**−54%**, nhờ compact) | 6 |
+| Guardrail (bonus) | 0.000 → **1.000** | 1 168 → 2 081 | 0 |
+
+Bonus: conflict handling, confidence threshold, entity extraction có cấu trúc. Ablation cho thấy tắt cả hai guardrail làm recall trên bộ Guardrail giảm 1.000 → 0.500.
+
+```bash
+pip install -r requirements.txt
+python src/benchmark.py           # 3 bảng benchmark (offline)
+python src/ablation.py            # bảng ablation dùng trong REPORT.md
+pytest src/test_agents.py -v      # 17 test
+python src/benchmark.py --live    # cần .env (xem .env.example)
+```
+
+---
+
 Trong Day 17 này, các bạn sẽ tập trung vào một câu hỏi rất thực tế: làm sao để AI agent **không chỉ trả lời tốt trong một lượt chat**, mà còn **nhớ đúng thông tin quan trọng qua nhiều phiên làm việc** mà vẫn kiểm soát được chi phí token.
 
 Trong bài lab này, các bạn sẽ xây dựng và so sánh hai agent:
