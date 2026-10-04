@@ -8,7 +8,13 @@ from agent_advanced import AdvancedAgent
 from agent_baseline import BaselineAgent
 from benchmark import heuristic_quality, load_conversations, recall_points, run_agent_benchmark
 from config import load_config
-from memory_store import CompactMemoryManager, UserProfileStore, extract_profile_facts, extract_profile_updates
+from memory_store import (
+    MAX_LIST_ITEMS,
+    CompactMemoryManager,
+    UserProfileStore,
+    extract_profile_facts,
+    extract_profile_updates,
+)
 from model_provider import message_text, turn_usage
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -228,3 +234,32 @@ def test_turn_usage_sums_every_model_call_in_the_turn() -> None:
     ]
     assert turn_usage(messages) == (230, 15)
     assert message_text(messages[-1]) == "Xong"
+
+
+def test_parallel_tool_writes_do_not_corrupt_user_md(tmp_path: Path) -> None:
+    # Live agents run tool calls in parallel; reproduces the UnicodeDecodeError seen in the first live run.
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = UserProfileStore(tmp_path / "profiles")
+    values = [f"sở thích số {index} – Đà Nẵng" for index in range(40)]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda value: store.upsert_fact("dungct", "interests", value), values))
+        list(pool.map(lambda index: store.upsert_fact("dungct", "location", ["Huế", "Đà Nẵng"][index % 2]), range(40)))
+
+    facts = store.facts("dungct")  # raises UnicodeDecodeError if a write was torn
+    assert facts["location"] in {"Huế", "Đà Nẵng"}
+    assert len(facts["interests"].split(", ")) == MAX_LIST_ITEMS
+
+
+def test_list_fields_decay_by_recency_and_reject_long_values(tmp_path: Path) -> None:
+    store = UserProfileStore(tmp_path / "profiles")
+    store.upsert_fact("dungct", "interests", "Python, AI")
+    for index in range(MAX_LIST_ITEMS - 1):
+        store.upsert_fact("dungct", "interests", f"chủ đề {index}")
+    store.upsert_fact("dungct", "interests", "Python")  # re-mentioned -> refreshed
+    store.upsert_fact("dungct", "interests", "chủ đề mới")
+
+    interests = store.facts("dungct")["interests"].split(", ")
+    assert len(interests) == MAX_LIST_ITEMS
+    assert "Python" in interests and "AI" not in interests  # AI was the least recently mentioned
+    assert store.upsert_fact("dungct", "pet", "corgi tên Bơ, " + "rất hay phá khi mình họp online " * 3) is False

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import math
+import os
 import re
+import threading
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,15 +42,25 @@ PROFILE_FIELDS: dict[str, str] = {
 
 # List-like preferences are merged (union); every other field is overwritten by the newest value.
 MERGE_FIELDS = {"response_style", "interests"}
+# Size guardrails: list fields keep the N most recently mentioned items (recency decay)
+# and over-long values are rejected, so User.md cannot grow without bound.
+MAX_LIST_ITEMS = 8
+MAX_ITEM_CHARS = 60
+MAX_VALUE_CHARS = 80
 
 _FACT_LINE = re.compile(r"^- (\w+): (.*)$")
 
 
 @dataclass
 class UserProfileStore:
-    """Persistent storage for `User.md`: one markdown file per user id."""
+    """Persistent storage for `User.md`: one markdown file per user id.
+
+    Thread-safe: a live agent may run several tool calls in parallel, so every
+    read-modify-write happens under one lock and files are replaced atomically.
+    """
 
     root_dir: Path
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
 
     def path_for(self, user_id: str) -> Path:
         slug = re.sub(r"[^A-Za-z0-9_-]+", "_", (user_id or "").strip()) or "anonymous"
@@ -58,29 +70,35 @@ class UserProfileStore:
         return f"# User Profile: {user_id}\n\n"
 
     def read_text(self, user_id: str) -> str:
-        path = self.path_for(user_id)
-        if not path.exists():
-            return self.default_profile(user_id)
-        return path.read_text(encoding="utf-8")
+        with self._lock:
+            path = self.path_for(user_id)
+            if not path.exists():
+                return self.default_profile(user_id)
+            return path.read_text(encoding="utf-8")
 
     def write_text(self, user_id: str, content: str) -> Path:
-        path = self.path_for(user_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8", newline="\n")
-        return path
+        with self._lock:
+            path = self.path_for(user_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_suffix(".md.tmp")
+            tmp_path.write_text(content, encoding="utf-8", newline="\n")
+            os.replace(tmp_path, path)
+            return path
 
     def edit_text(self, user_id: str, search_text: str, replacement: str) -> bool:
         if not search_text:
             return False
-        content = self.read_text(user_id)
-        if search_text not in content:
-            return False
-        self.write_text(user_id, content.replace(search_text, replacement, 1))
-        return True
+        with self._lock:
+            content = self.read_text(user_id)
+            if search_text not in content:
+                return False
+            self.write_text(user_id, content.replace(search_text, replacement, 1))
+            return True
 
     def file_size(self, user_id: str) -> int:
-        path = self.path_for(user_id)
-        return path.stat().st_size if path.exists() else 0
+        with self._lock:
+            path = self.path_for(user_id)
+            return path.stat().st_size if path.exists() else 0
 
     def facts(self, user_id: str) -> dict[str, str]:
         facts: dict[str, str] = {}
@@ -98,34 +116,45 @@ class UserProfileStore:
         """
 
         value = " ".join(normalize_text(value).split())
-        if not value:
+        if not value or (key not in MERGE_FIELDS and len(value) > MAX_VALUE_CHARS):
             return False
-        current = self.facts(user_id)
-        if key in MERGE_FIELDS and key in current:
-            value = merge_list_values(current[key], value)
-        if current.get(key) == value:
-            return False
+        with self._lock:
+            current = self.facts(user_id)
+            if key in MERGE_FIELDS:
+                value = merge_list_values(current.get(key, ""), value)
+                if not value:
+                    return False
+            if current.get(key) == value:
+                return False
 
-        content = self.read_text(user_id)
-        line = f"- {key}: {value}"
-        if key in current:
-            pattern = re.compile(rf"^- {re.escape(key)}: .*$", re.MULTILINE)
-            content = pattern.sub(lambda _: line, content, count=1)
-        else:
-            if not content.endswith("\n"):
-                content += "\n"
-            content += line + "\n"
-        self.write_text(user_id, content)
-        return True
+            content = self.read_text(user_id)
+            line = f"- {key}: {value}"
+            if key in current:
+                pattern = re.compile(rf"^- {re.escape(key)}: .*$", re.MULTILINE)
+                content = pattern.sub(lambda _: line, content, count=1)
+            else:
+                if not content.endswith("\n"):
+                    content += "\n"
+                content += line + "\n"
+            self.write_text(user_id, content)
+            return True
 
 
-def merge_list_values(old: str, new: str) -> str:
+def merge_list_values(old: str, new: str, max_items: int = MAX_LIST_ITEMS) -> str:
+    """Union of comma-separated items with recency decay.
+
+    A re-mentioned item moves to the end; when the list exceeds `max_items`, the items
+    that were not mentioned for the longest time are dropped. Over-long items are ignored.
+    """
+
     items: list[str] = []
     for part in [*old.split(","), *new.split(",")]:
-        part = part.strip()
-        if part and part.lower() not in {item.lower() for item in items}:
-            items.append(part)
-    return ", ".join(items)
+        part = part.strip().rstrip(".")
+        if not part or len(part) > MAX_ITEM_CHARS:
+            continue
+        items = [item for item in items if item.lower() != part.lower()]
+        items.append(part)
+    return ", ".join(items[-max_items:])
 
 
 # --------------------------------------------------------------------------- #

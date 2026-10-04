@@ -12,6 +12,7 @@ from memory_store import (
     estimate_tokens,
     extract_profile_updates,
     DEFAULT_CONFIDENCE_THRESHOLD,
+    MAX_VALUE_CHARS,
     is_recall_request,
 )
 from model_provider import build_chat_model, message_text, turn_usage
@@ -19,9 +20,12 @@ from model_provider import build_chat_model, message_text, turn_usage
 ADVANCED_SYSTEM_PROMPT = (
     "Bạn là trợ lý tiếng Việt có bộ nhớ dài hạn trong file User.md.\n"
     "- Dùng User.md để cá nhân hoá câu trả lời và trả lời câu hỏi về người dùng.\n"
-    "- Khi người dùng cung cấp fact ổn định mới hoặc đính chính, gọi tool `save_user_fact` để cập nhật.\n"
-    "- Không lưu câu hỏi, câu đùa, hay địa điểm chỉ ghé qua.\n"
-    "- Nếu có mâu thuẫn, luôn ưu tiên fact mới nhất trong User.md."
+    "- Hệ thống đã tự cập nhật User.md với các fact cơ bản trước mỗi lượt. Chỉ gọi `save_user_fact` "
+    "khi thấy một fact ổn định quan trọng còn THIẾU hoặc SAI trong User.md; không ghi lại thứ đã có.\n"
+    "- Mỗi giá trị phải là cụm từ ngắn (vài từ). Không lưu hoạt động hằng ngày, kế hoạch, cảm xúc, "
+    "câu hỏi, câu đùa, hay địa điểm chỉ ghé qua.\n"
+    "- Nếu có mâu thuẫn, luôn ưu tiên fact mới nhất trong User.md.\n"
+    "- Trả lời ngắn gọn, đúng trọng tâm câu hỏi."
 )
 
 
@@ -190,14 +194,17 @@ class AdvancedAgent:
 
         @tool
         def save_user_fact(key: str, value: str) -> str:
-            """Lưu hoặc cập nhật một fact ổn định vào User.md.
+            """Lưu hoặc sửa MỘT fact ổn định còn thiếu/sai trong User.md.
 
             key là một trong: name, location, profession, response_style, interests,
-            favorite_drink, favorite_food, pet.
+            favorite_drink, favorite_food, pet. value là cụm từ ngắn (tối đa vài từ),
+            ví dụ key="location", value="Huế".
             """
 
             if key not in PROFILE_FIELDS:
                 return f"Key không hợp lệ: {key}"
+            if len(value) > MAX_VALUE_CHARS:
+                return f"Giá trị quá dài (>{MAX_VALUE_CHARS} ký tự), hãy rút gọn thành vài từ."
             changed = store.upsert_fact(current_user(), key, value)
             return "updated" if changed else "unchanged"
 
